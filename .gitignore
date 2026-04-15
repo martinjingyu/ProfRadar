@@ -1,0 +1,30 @@
+# Environment
+.env
+.env.local
+
+# User config (saved school/interests)
+.user_config.json
+
+# CSRankings data cache
+data/
+
+# Generated professor profiles and reports
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
