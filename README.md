@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🎓 Auto-Research
+# 🔬 FindYourLab
 
 **AI-powered professor discovery for PhD applicants**
 
@@ -44,8 +44,8 @@ You tell it a school and your research interests. It does the rest:
 ## Quick Start
 
 ```bash
-git clone https://github.com/yourname/Auto-Research.git
-cd Auto-Research
+git clone https://github.com/yourname/FindYourLab.git
+cd FindYourLab
 pip install -r requirements.txt
 
 cp .env.example .env
@@ -202,7 +202,7 @@ Fetching and summarizing are fully parallel — 50 professors typically finish i
 ## Project Structure
 
 ```
-Auto-Research/
+FindYourLab/
 ├── main.py                  # Entry point & orchestration
 ├── data_manager.py          # CSRankings data fetching & caching
 ├── school_selector.py       # Interactive school picker
