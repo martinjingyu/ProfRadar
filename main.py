@@ -83,15 +83,20 @@ def ensure_data(force_update: bool = False) -> None:
 # -- School selection (with memory) -------------------------------------------
 
 def get_school(cfg: dict) -> tuple[str, dict]:
-    saved = cfg.get("school")
-    if saved:
-        ans = input(f"\nLast school: {saved}\n  Press Enter to keep, or 'c' to change: ").strip().lower()
+    saved_school = cfg.get("school")
+    saved_region = cfg.get("region")
+    if saved_school:
+        region_label = f" ({saved_region})" if saved_region else ""
+        ans = input(
+            f"\nLast school: {saved_school}{region_label}\n  Press Enter to keep, or 'c' to change: "
+        ).strip().lower()
         if ans != "c":
-            return saved, cfg
+            return saved_school, cfg
 
     from school_selector import select_school
-    school = select_school()
+    school, region = select_school()
     cfg["school"] = school
+    cfg["region"] = region
     save_config(cfg)
     return school, cfg
 

@@ -17,9 +17,9 @@ Find the right professors to cold-email — automatically.
 
 ## What it does
 
-You tell it a school and your research interests. It does the rest:
+You tell it a region, a school, and your research interests. It does the rest:
 
-1. **Fetches** the full faculty list from [CSRankings](https://csrankings.org) (live data)
+1. **Fetches** the full faculty list from [CSRankings](https://csrankings.org) (live data, 7 regions supported)
 2. **Scrapes** every professor's homepage — in parallel
 3. **Summarizes** each professor's research with an LLM
 4. **Generates** a ranked list of professors you should actually email, with a personalized tip for each
@@ -54,7 +54,7 @@ cp .env.example .env
 python main.py --limit 50
 ```
 
-Your choices are remembered — next run just press Enter to reuse the same school and interests.
+Your choices are remembered — next run just press Enter to reuse the same region, school, and interests.
 
 ---
 
@@ -222,6 +222,22 @@ ProfRadar/
 
 ---
 
+## Supported Regions
+
+| Region | Country Code |
+|--------|-------------|
+| United States | US |
+| China | CN |
+| United Kingdom | GB |
+| Canada | CA |
+| Australia | AU |
+| Switzerland | CH |
+| Singapore | SG |
+
+Region is selected interactively at startup and remembered for future runs.
+
+---
+
 ## Data Source
 
 Faculty data comes from **[CSRankings](https://csrankings.org)** by Emery Berger — the most widely used metric-based ranking of CS research institutions. The raw CSV files are fetched directly from the [GitHub repository](https://github.com/emeryberger/CSrankings) and cached locally. Run `python main.py --update` to refresh.
@@ -235,7 +251,7 @@ PRs welcome. Some ideas:
 - [ ] Cache scraped homepages to avoid re-fetching on re-runs
 - [ ] Filter professors by CSRankings area before scraping (e.g., only ML/NLP profs)
 - [ ] Export match report as PDF
-- [ ] Support non-US schools (currently filters to US institutions)
+- [x] Support non-US schools — US, China, UK, Canada, Australia, Switzerland, Singapore
 - [ ] Add a web UI
 
 ---

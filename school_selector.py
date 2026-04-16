@@ -1,16 +1,43 @@
 """
-Interactive school selection with incremental keyword filtering.
+Interactive school selection with region filter and incremental keyword filtering.
 """
 
-from data_manager import get_schools
+from data_manager import get_schools, SUPPORTED_REGIONS
 
 
-def select_school() -> str:
+def select_region() -> str:
     """
-    Interactively ask the user to choose a school.
-    Returns the exact school name as it appears in CSRankings.
+    Interactively ask the user to choose a region.
+    Returns a key from SUPPORTED_REGIONS.
     """
-    all_schools = get_schools()
+    regions = list(SUPPORTED_REGIONS.keys())
+
+    print("\nRegion Selection")
+    for i, name in enumerate(regions, 1):
+        print(f"  {i}. {name}")
+    print()
+
+    while True:
+        choice = input("  Select region (number): ").strip()
+        if choice.isdigit():
+            idx = int(choice) - 1
+            if 0 <= idx < len(regions):
+                selected = regions[idx]
+                print(f"\n  Region: {selected}\n")
+                return selected
+        print(f"  Please enter a number between 1 and {len(regions)}.")
+
+
+def select_school(region: str | None = None) -> tuple[str, str]:
+    """
+    Interactively ask the user to choose a school within *region*.
+    If region is None, prompts for region selection first.
+    Returns (school_name, region) — school name as it appears in CSRankings.
+    """
+    if region is None:
+        region = select_region()
+
+    all_schools = get_schools(region)
 
     print("\nSchool Selection")
     print("  Type a keyword to filter, then enter the number to select.")
@@ -35,7 +62,7 @@ def select_school() -> str:
         if len(matches) == 1:
             choice = input(f"  Press Enter to confirm [{matches[0]}], or search again: ").strip()
             if not choice:
-                return matches[0]
+                return matches[0], region
             continue
 
         choice = input("  Enter number to select, or type a new keyword to filter: ").strip()
@@ -45,7 +72,7 @@ def select_school() -> str:
             if 0 <= idx < len(matches):
                 selected = matches[idx]
                 print(f"\n  Selected: {selected}\n")
-                return selected
+                return selected, region
             else:
                 print(f"  Number out of range (1-{len(matches)}). Try again.\n")
         else:

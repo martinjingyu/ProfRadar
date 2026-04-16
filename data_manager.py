@@ -183,20 +183,40 @@ def _parse_areas() -> dict[str, list[str]]:
     return {name: sorted(areas) for name, areas in name_areas.items()}
 
 
-def get_schools() -> list[str]:
+# Supported regions: display name → list of CSRankings countryabbrv codes
+SUPPORTED_REGIONS: dict[str, list[str]] = {
+    "United States": ["US"],
+    "China":         ["CN"],
+    "United Kingdom":["GB", "UK"],
+    "Canada":        ["CA"],
+    "Australia":     ["AU"],
+    "Switzerland":   ["CH"],
+    "Singapore":     ["SG"],
+}
+
+
+def get_schools(region: str | None = None) -> list[str]:
     """
     Return a sorted list of institution names from institutions.csv.
-    Only returns US institutions (countryabbrv == 'US') to keep the list manageable.
+
+    Args:
+        region: A key from SUPPORTED_REGIONS (e.g. "United States"), or None to
+                return schools from all supported regions.
     """
     path = DATA_DIR / "institutions.csv"
     if not path.exists():
         raise FileNotFoundError("institutions.csv not found — run fetch_all_data() first.")
 
+    if region is not None:
+        allowed_codes = {c.upper() for c in SUPPORTED_REGIONS.get(region, [])}
+    else:
+        allowed_codes = {c.upper() for codes in SUPPORTED_REGIONS.values() for c in codes}
+
     schools: list[str] = []
     reader = csv.DictReader(io.StringIO(_load("institutions.csv")))
     for row in reader:
         country = row.get("countryabbrv", "").strip().upper()
-        if country == "US":
+        if country in allowed_codes:
             name = row.get("institution", "").strip()
             if name:
                 schools.append(name)
