@@ -1,0 +1,6 @@
+2026/05/27-16:27:08.547 3f30 Creating DB C:\Users\LX034\AppData\Local\Google\Chrome\User Data\Profile 1\IndexedDB\https_www.bing.com_0.indexeddb.leveldb since it was missing.
+2026/05/27-16:27:08.558 3f30 Reusing MANIFEST C:\Users\LX034\AppData\Local\Google\Chrome\User Data\Profile 1\IndexedDB\https_www.bing.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/05/27-16:38:29.152 3024 Level-0 table #5: started
+2026/05/27-16:38:29.161 3024 Level-0 table #5: 397 bytes OK
+2026/05/27-16:38:29.163 3024 Delete type=0 #3
+2026/05/27-16:38:29.164 3024 Manual compaction at level-0 from (begin) .. (end); will stop at (end)

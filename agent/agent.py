@@ -6,11 +6,13 @@ import time
 import uuid
 from typing import Any
 
-from .context import compact_messages, rough_tokens, tool_result_too_large
+from .context import compact_messages, rough_tokens
 from .llm import LLMClient
 from .paths import SESSIONS_DIR, ensure_project_dirs
-from .prompts import SELF_REVIEW_PROMPT, build_system_prompt
+from .prompts import build_system_prompt
+from .self_review import trigger_self_review
 from .state import new_session_id, save_session
+from .text_clean import clean_text
 from .tools import load_builtin_tools, registry
 from .ui import ConsoleUI
 
@@ -20,6 +22,8 @@ COMPACT_AFTER_FINAL_TOOL_COUNT = 8
 MAX_TOOL_RESULT_CHARS = 8_000
 SPILL_PREVIEW_CHARS = 600
 SNAPSHOT_TOOL_NAMES = {"browser_navigate", "browser_snapshot"}
+READ_FILE_TOOL_NAMES = {"read_file", "web_fetch", "read_url_pdf", "read_pdf"}
+NOTES_TOOL_NAME = "save_research_notes"
 NO_SPILL_TOOLS = {
     "read_file",
     "list_files",
@@ -30,6 +34,37 @@ NO_SPILL_TOOLS = {
     "run_cmd",
 }
 PREVIOUS_SNAPSHOT_LIMIT = 2_000
+PREVIOUS_READ_FILE_LIMIT = 500
+
+# Trajectory char-based compression (cheaper to compute than tokens)
+TRAJECTORY_COMPRESS_THRESHOLD = 180_000
+TRAJECTORY_COMPRESS_MIN_GAP = 5
+
+# Max-loop fallback: inject finish reminder and block expensive fetch tools
+CONTINUATION_MAX_ITERS = 30
+FINISH_BLOCKED_TOOLS = {
+    "web_fetch",
+    "read_url_pdf",
+    "read_pdf",
+    "fetch_csrankings_data",
+    "bing_search",
+    "google_search",
+    "baidu_search",
+    "reddit_search",
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_click",
+    "browser_type",
+    "browser_press_key",
+    "browser_scroll",
+    "browser_screenshot",
+    "browser_back",
+}
+FINISH_REMINDER = (
+    "Maximum iteration budget reached. Do not fetch more data or research more professors. "
+    "Finish immediately using the information already gathered. "
+    "If a report is needed, call generate_match_report then write_file now, then call respond_to_user."
+)
 
 
 def _reasoning_content(message: Any) -> str | None:
@@ -64,6 +99,7 @@ class GeneralAgent:
         self.task_id = f"task_{uuid.uuid4().hex[:8]}"
         self._spill_dir = SESSIONS_DIR / ".tool_cache" / self.session_id
         self._spill_counter = 0
+        self._last_trajectory_compress_iter = 0
         self.ui.session_start(self.session_id, self.task_id)
         self._pending_restart: list[str] | None = None
         self._pending_restart_prompt: str | None = None
@@ -131,9 +167,7 @@ class GeneralAgent:
                         self.ui.compact(
                             f"pre-loop: {decision.get('reason', 'new independent task')}"
                         )
-                        compacted = compact_messages(
-                            messages, self.llm, focus=focus
-                        )
+                        compacted = compact_messages(messages, self.llm, focus=focus)
                         return self._repair_tool_sequences(compacted)
                     else:
                         self.ui.event(
@@ -174,9 +208,7 @@ class GeneralAgent:
         system_prompt = build_system_prompt(self._skills_index())
 
         if messages:
-            compacted = self._pre_loop_compact_review(
-                messages, user_message, system_prompt
-            )
+            compacted = self._pre_loop_compact_review(messages, user_message, system_prompt)
             if compacted is not None:
                 messages = compacted
                 system_prompt = build_system_prompt(self._skills_index())
@@ -185,6 +217,18 @@ class GeneralAgent:
         final_text = ""
 
         for iteration in range(1, self.max_iterations + 1):
+            # ── Char-based trajectory compression ────────────────────────
+            if (
+                iteration - self._last_trajectory_compress_iter >= TRAJECTORY_COMPRESS_MIN_GAP
+                and self._estimate_message_chars(messages) >= TRAJECTORY_COMPRESS_THRESHOLD
+            ):
+                self.ui.compact(f"trajectory exceeded {TRAJECTORY_COMPRESS_THRESHOLD:,} chars")
+                messages = compact_messages(messages, self.llm, focus=user_message, protect_last=18)
+                messages = self._repair_tool_sequences(messages)
+                system_prompt = build_system_prompt(self._skills_index())
+                self._last_trajectory_compress_iter = iteration
+
+            # ── Token-based threshold compression ────────────────────────
             if rough_tokens(messages, system_prompt) > self.context_threshold_tokens:
                 self.ui.compact("context threshold exceeded")
                 messages = compact_messages(messages, self.llm, focus=user_message)
@@ -205,6 +249,7 @@ class GeneralAgent:
                 messages.append({"role": "assistant", "content": final_text})
                 self.ui.final()
                 break
+
             assistant = response.choices[0].message
             assistant_msg = {"role": "assistant", "content": assistant.content or ""}
             reasoning = _reasoning_content(assistant)
@@ -226,9 +271,7 @@ class GeneralAgent:
                 ]
                 messages.append(assistant_msg)
 
-                compacted = self._pre_action_compact_check(
-                    messages, system_prompt, user_message
-                )
+                compacted = self._pre_action_compact_check(messages, system_prompt, user_message)
                 if compacted is not None:
                     messages = compacted
                     system_prompt = build_system_prompt(self._skills_index())
@@ -239,10 +282,7 @@ class GeneralAgent:
                     if final_text:
                         args = {}
                         result = json.dumps(
-                            {
-                                "success": True,
-                                "message": "Skipped because final response was already captured.",
-                            },
+                            {"success": True, "message": "Skipped because final response was already captured."},
                             ensure_ascii=False,
                         )
                     else:
@@ -262,10 +302,7 @@ class GeneralAgent:
                             result = registry.dispatch(tc.function.name, args, runtime)
                         except KeyboardInterrupt:
                             result = json.dumps(
-                                {
-                                    "success": False,
-                                    "error": "Tool interrupted by user before completion.",
-                                },
+                                {"success": False, "error": "Tool interrupted by user before completion."},
                                 ensure_ascii=False,
                             )
                             interrupted = True
@@ -277,6 +314,7 @@ class GeneralAgent:
                             self._pending_restart = runtime["_pending_restart"]
                             if runtime.get("_pending_restart_prompt"):
                                 self._pending_restart_prompt = runtime["_pending_restart_prompt"]
+
                     result = self._process_tool_result(result, tc.function.name)
                     self.ui.tool_done(tc.function.name, result)
                     messages.append(
@@ -287,15 +325,18 @@ class GeneralAgent:
                             "content": result,
                         }
                     )
+
                     if tc.function.name in SNAPSHOT_TOOL_NAMES:
                         self._compress_previous_snapshot(messages)
+                    elif tc.function.name == NOTES_TOOL_NAME:
+                        # Replace previous large result with the notes; compress old read results
+                        self._replace_previous_result_with_notes(messages, args.get("notes", ""))
+                        self._compress_old_read_files(messages)
+
                     if interrupted:
-                        for skipped in tool_calls[index + 1 :]:
+                        for skipped in tool_calls[index + 1:]:
                             skipped_result = json.dumps(
-                                {
-                                    "success": False,
-                                    "error": "Tool skipped because the user interrupted this action batch.",
-                                },
+                                {"success": False, "error": "Tool skipped because the user interrupted this action batch."},
                                 ensure_ascii=False,
                             )
                             self.ui.tool_done(skipped.function.name, skipped_result)
@@ -315,6 +356,7 @@ class GeneralAgent:
                             messages.append({"role": "assistant", "content": final_text})
                             self.ui.final()
                         break
+
                 if interrupted:
                     if final_text:
                         break
@@ -334,6 +376,7 @@ class GeneralAgent:
             messages.append(assistant_msg)
             break
 
+        # ── Max-loop fallback: inject finish reminder and run continuation loop ──
         if not final_text:
             final_text = self._fallback_final_response(messages, user_message)
             messages.append({"role": "assistant", "content": final_text})
@@ -342,8 +385,17 @@ class GeneralAgent:
         messages = self._repair_tool_sequences(messages)
         session_path = save_session(self.session_id, messages)
         self.ui.saved(str(session_path))
+
         if final_text and self.self_review_enabled:
-            self._self_review(messages)
+            trigger_self_review(
+                session_id=self.session_id,
+                task_id=self.task_id,
+                messages=messages,
+                skills_index=self._skills_index(),
+                model=self.llm.model,
+                provider=self.llm.provider,
+                background=True,
+            )
 
         if self._pending_restart:
             from .guardian import request_restart
@@ -363,13 +415,27 @@ class GeneralAgent:
             "messages": messages,
         }
 
+    # ── Tool result processing ────────────────────────────────────────────────
+
     def _process_tool_result(self, result: Any, tool_name: str) -> Any:
-        result = tool_result_too_large(result)
-        if not isinstance(result, str) or len(result) <= MAX_TOOL_RESULT_CHARS:
+        if not isinstance(result, str):
+            return result
+        result = clean_text(result)
+        if len(result) <= MAX_TOOL_RESULT_CHARS:
             return result
         if tool_name in NO_SPILL_TOOLS:
             return result[:MAX_TOOL_RESULT_CHARS] + "\n[truncated]"
         return self._spill_tool_result(result, tool_name)
+
+    def _estimate_message_chars(self, messages: list[dict[str, Any]]) -> int:
+        total = 0
+        for msg in messages:
+            content = msg.get("content") or ""
+            total += len(content) if isinstance(content, str) else len(str(content))
+            for tc in msg.get("tool_calls") or []:
+                if isinstance(tc, dict):
+                    total += len((tc.get("function") or {}).get("arguments", ""))
+        return total
 
     def _spill_tool_result(self, result: str, tool_name: str) -> str:
         self._spill_dir.mkdir(parents=True, exist_ok=True)
@@ -385,7 +451,10 @@ class GeneralAgent:
             f"{preview}\n[...]"
         )
 
+    # ── In-context compression helpers ───────────────────────────────────────
+
     def _compress_previous_snapshot(self, messages: list[dict[str, Any]]) -> None:
+        """Compress the second-most-recent browser snapshot to save context."""
         found = 0
         for index in range(len(messages) - 1, -1, -1):
             msg = messages[index]
@@ -402,38 +471,135 @@ class GeneralAgent:
                 }
             return
 
-    def _interrupt_correction(self) -> str | None:
-        self.ui.interrupt()
-        try:
-            value = input("\nCorrection> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return None
-        if not value or value in {"/stop", "/exit", "/quit"}:
-            return None
-        return (
-            "[USER INTERRUPT CORRECTION]\n"
-            "The previous action path looked wrong or should be adjusted. "
-            "Follow this correction for the remaining work:\n"
-            f"{value}"
-        )
+    def _replace_previous_result_with_notes(
+        self, messages: list[dict[str, Any]], notes_content: str
+    ) -> None:
+        """Replace the most recent non-notes tool result with the agent's notes."""
+        notes_content = str(notes_content or "").strip()
+        if not notes_content:
+            return
+        # Find the last non-notes tool result and annotate it with the notes
+        for index in range(len(messages) - 2, -1, -1):
+            msg = messages[index]
+            if msg.get("role") == "tool" and msg.get("name") != NOTES_TOOL_NAME:
+                previous = str(msg.get("content", ""))
+                if previous.startswith("[notes saved from previous result]"):
+                    content = previous + "\n\n" + notes_content
+                else:
+                    content = "[notes saved from previous result]\n" + notes_content
+                messages[index] = {**msg, "content": content}
+                break
+        # Collapse the notes tool result itself to save space
+        for index in range(len(messages) - 1, -1, -1):
+            msg = messages[index]
+            if msg.get("role") == "tool" and msg.get("name") == NOTES_TOOL_NAME:
+                messages[index] = {**msg, "content": "[compressed]"}
+                break
+
+    def _compress_old_read_files(self, messages: list[dict[str, Any]]) -> None:
+        """After notes are saved, compress any old large fetch/read results in context."""
+        for index, msg in enumerate(messages):
+            if msg.get("role") != "tool" or msg.get("name") not in READ_FILE_TOOL_NAMES:
+                continue
+            content = str(msg.get("content", ""))
+            if (
+                content.startswith("[notes saved from previous result]")
+                or content.startswith("[compressed]")
+                or content.startswith("[content too large; saved to disk]")
+            ):
+                continue
+            if len(content) > PREVIOUS_READ_FILE_LIMIT:
+                messages[index] = {
+                    **msg,
+                    "content": content[:PREVIOUS_READ_FILE_LIMIT]
+                    + "\n[old result compressed; call the tool again if needed]",
+                }
+
+    # ── Max-loop fallback ─────────────────────────────────────────────────────
 
     def _fallback_final_response(self, messages: list[dict[str, Any]], user_message: str) -> str:
-        prompt = f"""The agent reached its iteration limit without a final response.
+        messages.append({"role": "user", "content": FINISH_REMINDER})
+        return self._run_to_finish(messages)
 
-Write a concise user-facing status update in the user's language.
-Include what was done, any files saved, and what remains. Do not claim completion if no report was saved.
+    def _run_to_finish(self, messages: list[dict[str, Any]]) -> str:
+        """Continuation loop after max iterations: inject reminder, block fetch tools, keep writing."""
+        for iteration in range(1, CONTINUATION_MAX_ITERS + 1):
+            api_messages = [
+                {"role": "system", "content": build_system_prompt(self._skills_index())},
+                *messages,
+            ]
+            try:
+                response = self.llm.chat(api_messages, registry.definitions())
+            except Exception as exc:
+                self.ui.event("finish", f"model error: {type(exc).__name__}")
+                time.sleep(3)
+                continue
 
-Original user request:
-{user_message}
+            assistant = response.choices[0].message
+            tool_calls = getattr(assistant, "tool_calls", None) or []
+            if not tool_calls:
+                return assistant.content or "Stopped after reaching the iteration limit without a final answer."
 
-Recent conversation JSON:
-{json.dumps(messages[-16:], ensure_ascii=False, default=str)}
-"""
-        try:
-            return self.llm.complete_text(prompt).strip() or "I stopped after reaching the iteration limit before producing a final answer."
-        except Exception:
-            return "I stopped after reaching the iteration limit before producing a final answer."
+            assistant_msg: dict[str, Any] = {
+                "role": "assistant",
+                "content": assistant.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments or "{}"},
+                    }
+                    for tc in tool_calls
+                ],
+            }
+            messages.append(assistant_msg)
+
+            final_text = ""
+            for tc in tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                    if not isinstance(args, dict):
+                        args = {}
+                except json.JSONDecodeError:
+                    args = {}
+
+                if tc.function.name in FINISH_BLOCKED_TOOLS:
+                    result = json.dumps(
+                        {
+                            "success": False,
+                            "error": f"Tool '{tc.function.name}' is blocked in finish mode. {FINISH_REMINDER}",
+                        },
+                        ensure_ascii=False,
+                    )
+                else:
+                    runtime = {"task_id": self.task_id, "session_id": self.session_id}
+                    result = registry.dispatch(tc.function.name, args, runtime)
+                    if runtime.get("final_response") is not None:
+                        final_text = str(runtime.get("final_response") or "")
+
+                result = self._process_tool_result(result, tc.function.name)
+                messages.append(
+                    {"role": "tool", "tool_call_id": tc.id, "name": tc.function.name, "content": result}
+                )
+                if tc.function.name in SNAPSHOT_TOOL_NAMES:
+                    self._compress_previous_snapshot(messages)
+                elif tc.function.name == NOTES_TOOL_NAME:
+                    self._replace_previous_result_with_notes(messages, args.get("notes", ""))
+                    self._compress_old_read_files(messages)
+                if final_text:
+                    break
+
+            if final_text:
+                return final_text
+            messages.append({"role": "user", "content": FINISH_REMINDER})
+
+        # Last-resort: return latest assistant text
+        for msg in reversed(messages):
+            if msg.get("role") == "assistant" and msg.get("content"):
+                return str(msg["content"])
+        return "Stopped after reaching the iteration limit without a final answer."
+
+    # ── Sequence repair ───────────────────────────────────────────────────────
 
     def _repair_tool_sequences(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         repaired: list[dict[str, Any]] = []
@@ -488,10 +654,7 @@ Recent conversation JSON:
                                 "tool_call_id": tcid,
                                 "name": tool_name,
                                 "content": json.dumps(
-                                    {
-                                        "success": False,
-                                        "error": "Recovered missing tool result from a previous interrupted run.",
-                                    },
+                                    {"success": False, "error": "Recovered missing tool result from a previous interrupted run."},
                                     ensure_ascii=False,
                                 ),
                             }
@@ -501,77 +664,21 @@ Recent conversation JSON:
             i += 1
         return repaired
 
-    def _self_review(self, completed_messages: list[dict[str, Any]]) -> None:
-        self.ui.self_review_start()
-        allowed = {"memory", "skills_list", "skill_view", "skill_manage"}
-        tools = [tool for tool in registry.definitions() if tool["function"]["name"] in allowed]
-        messages = [
-            {"role": "system", "content": build_system_prompt(self._skills_index())},
-            {
-                "role": "user",
-                "content": (
-                    "Conversation transcript for self-review:\n\n"
-                    + self._review_transcript(completed_messages)
-                    + "\n\n"
-                    + SELF_REVIEW_PROMPT
-                ),
-            },
-        ]
-        for _ in range(6):
-            response = self.llm.chat(messages, tools)
-            assistant = response.choices[0].message
-            tool_calls = getattr(assistant, "tool_calls", None) or []
-            assistant_msg = {"role": "assistant", "content": assistant.content or ""}
-            reasoning = _reasoning_content(assistant)
-            if reasoning:
-                assistant_msg["reasoning_content"] = reasoning
-            if tool_calls:
-                assistant_msg["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {"name": tc.function.name, "arguments": tc.function.arguments or "{}"},
-                    }
-                    for tc in tool_calls
-                ]
-                messages.append(assistant_msg)
-                for tc in tool_calls:
-                    if tc.function.name not in allowed:
-                        result = json.dumps({"success": False, "error": "tool not allowed in self-review"})
-                    else:
-                        try:
-                            args = json.loads(tc.function.arguments or "{}")
-                        except json.JSONDecodeError:
-                            args = {}
-                        result = registry.dispatch(tc.function.name, args, {"task_id": self.task_id, "session_id": self.session_id})
-                    messages.append({"role": "tool", "tool_call_id": tc.id, "name": tc.function.name, "content": result})
-                continue
-            break
-        self.ui.self_review_done()
-
-    def _review_transcript(self, messages: list[dict[str, Any]]) -> str:
-        lines: list[str] = []
-        for msg in messages[-36:]:
-            role = msg.get("role", "")
-            if role == "assistant" and msg.get("tool_calls"):
-                calls = []
-                for tc in msg.get("tool_calls", []):
-                    fn = (tc.get("function") or {}).get("name", "?")
-                    calls.append(fn)
-                lines.append(f"[tool calls: {', '.join(calls)}]")
-            elif role == "assistant":
-                content = (msg.get("content") or "")[:200]
-                if content:
-                    lines.append(content)
-            elif role == "user":
-                content = (msg.get("content") or "")[:200]
-                if content and not content.startswith("[CONTEXT COMPACTION"):
-                    lines.append(f"user: {content}")
-            elif role == "tool":
-                name = msg.get("name", "?")
-                content = (msg.get("content") or "")[:120]
-                lines.append(f"  -> {name}: {content}")
-        return "\n".join(lines)
+    def _interrupt_correction(self) -> str | None:
+        self.ui.interrupt()
+        try:
+            value = input("\nCorrection> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+        if not value or value in {"/stop", "/exit", "/quit"}:
+            return None
+        return (
+            "[USER INTERRUPT CORRECTION]\n"
+            "The previous action path looked wrong or should be adjusted. "
+            "Follow this correction for the remaining work:\n"
+            f"{value}"
+        )
 
 
 ResearchAgent = GeneralAgent

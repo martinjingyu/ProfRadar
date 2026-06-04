@@ -74,6 +74,7 @@ After reading, synthesize:
 
 ### Step 5 — Generate match report
 
+**Preferred approach** (uses LLM to write a polished report):
 ```
 generate_match_report(
   summaries=[...],     ← the list you built in step 4
@@ -81,8 +82,31 @@ generate_match_report(
   school="..."
 )
 ```
-
 Returns the full report text and `saved_to` path.
+
+**Fallback approach** (if `generate_match_report` fails due to missing dependencies or API errors):
+Write the report manually using `write_file`. Structure it as:
+```markdown
+# Match Report — <School>
+**Date**: <date>
+**Your Interests**: <user interests>
+**Professors Researched**: <count>
+
+## Top Matches
+### 1. <Name> — <Match Score>/10
+- **Areas**: <areas>
+- **Summary**: <short_summary>
+- **Why it fits**: <alignment with user interests>
+- **Homepage**: <url>
+
+### 2. ...
+...
+
+## Full Professor List
+<All researched professors with name, areas, summary, homepage>
+```
+
+Save to: `output/<school>/match_report_<date>.md`
 
 ### Step 6 — Respond to user
 
@@ -111,7 +135,11 @@ output/
 |---------|--------|
 | "CSRankings data not found" | Call `fetch_csrankings_data` |
 | 0 professors found | Call `list_schools` — school name likely wrong |
-| Homepage fetch fails | Try `https://scholar.google.com/citations?user=<scholarid>` |
+| Homepage fetch fails (404) | Try `https://scholar.google.com/citations?user=<scholarid>` |
+| Homepage fetch fails (403) | Server is blocking automated fetches. Try a different URL (e.g., department profile page, Google Scholar, DBLP). If all fail, note "homepage inaccessible" in summary. |
+| Homepage fetch fails (SSL error) | The site has TLS issues. Skip this professor or try an alternative URL. |
 | PDF extraction returns empty | Page may be image-only scan — skip or note in summary |
 | Context growing too large | Call `compact_context` before next professor batch |
-| generate_match_report fails with provider error | Check `.env` for ANTHROPIC_API_KEY / OPENAI_API_KEY |
+| generate_match_report fails with ModuleNotFoundError | Missing dependency (e.g., `anthropic`). Install it via `pip install anthropic` or fall back to writing the report manually with `write_file` using a structured Markdown template. |
+| generate_match_report fails with provider/auth error | Check `.env` for ANTHROPIC_API_KEY / OPENAI_API_KEY |
+| Iteration budget exhausted mid-research | Prioritize professors with the strongest area overlap first. If budget runs out, use whatever summaries you have (even 5–10) to generate the report. Call `compact_context(focus="summaries and user interests")` to free budget. |

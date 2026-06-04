@@ -11,6 +11,8 @@ from typing import Any
 
 from openai import OpenAI
 
+from .env import get_env
+
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
@@ -19,26 +21,30 @@ CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 def _provider(explicit: str | None = None) -> str:
     if explicit:
         return explicit.strip().lower()
-    value = os.getenv("AGENT_PROVIDER") or os.getenv("MODEL_PROVIDER")
+    value = (
+        get_env("AGENT_PROVIDER")
+        or get_env("MODEL_PROVIDER")
+        or get_env("SCREENING_MODEL_PROVIDER")
+    )
     if value:
         return value.strip().lower()
-    if os.getenv("CODEX_MODEL"):
+    if get_env("CODEX_MODEL"):
         return "codex"
-    if os.getenv("DEEPSEEK_API_KEY"):
+    if get_env("DEEPSEEK_API_KEY"):
         return "deepseek"
     return "openai"
 
 
 def _deepseek_model() -> str:
-    return os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+    return get_env("DEEPSEEK_MODEL", "deepseek-v4-flash")
 
 
 def _openai_model() -> str:
-    return os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    return get_env("OPENAI_MODEL", "gpt-4o-mini")
 
 
 def _codex_model() -> str:
-    return os.getenv("CODEX_MODEL", "gpt-5.4")
+    return get_env("CODEX_MODEL", "gpt-5.4")
 
 
 def _default_model(provider: str) -> str:
@@ -50,7 +56,7 @@ def _default_model(provider: str) -> str:
 
 
 def _deepseek_extra_body() -> dict[str, Any] | None:
-    thinking = os.getenv("DEEPSEEK_THINKING", "disabled").strip().lower()
+    thinking = get_env("DEEPSEEK_THINKING", "disabled").strip().lower()
     if thinking in {"enabled", "disabled"}:
         return {"thinking": {"type": thinking}}
     return None
@@ -58,7 +64,7 @@ def _deepseek_extra_body() -> dict[str, Any] | None:
 
 def _read_codex_access_token() -> str:
     candidates = [
-        Path(os.getenv("CODEX_HOME", str(Path.home() / ".codex"))) / "auth.json",
+        Path(get_env("CODEX_HOME", str(Path.home() / ".codex"))) / "auth.json",
         Path.home() / ".hermes" / "auth.json",
     ]
     for path in candidates:
@@ -180,26 +186,31 @@ class LLMClient:
         self.provider = _provider(provider)
         self.model = model or _default_model(self.provider)
         self._codex_token: str | None = None
-        self.client = self._build_client()
+        self._client: OpenAI | None = None
+
+    def _client_or_create(self) -> OpenAI:
+        if self._client is None:
+            self._client = self._build_client()
+        return self._client
 
     def _build_client(self) -> OpenAI:
         if self.provider == "codex":
             self._codex_token = _read_codex_access_token()
             return OpenAI(
                 api_key=self._codex_token,
-                base_url=os.getenv("CODEX_BASE_URL", CODEX_BASE_URL),
+                base_url=get_env("CODEX_BASE_URL", CODEX_BASE_URL),
                 default_headers=_codex_headers(self._codex_token),
                 max_retries=0,
                 timeout=120.0,
             )
         if self.provider == "deepseek":
             return OpenAI(
-                api_key=os.getenv("DEEPSEEK_API_KEY"),
-                base_url=os.getenv("DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL),
+                api_key=get_env("DEEPSEEK_API_KEY"),
+                base_url=get_env("DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL),
             )
         return OpenAI(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            base_url=os.getenv("OPENAI_BASE_URL") or None,
+            api_key=get_env("OPENAI_API_KEY"),
+            base_url=get_env("OPENAI_BASE_URL") or None,
         )
 
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> Any:
@@ -211,21 +222,21 @@ class LLMClient:
             "messages": messages,
             "tools": tools or None,
             "tool_choice": "auto" if tools else None,
-            "temperature": float(os.getenv("AGENT_TEMPERATURE", "0.2")),
+            "temperature": float(get_env("AGENT_TEMPERATURE", "0.2")),
         }
         if self.provider == "deepseek":
             extra_body = _deepseek_extra_body()
             if extra_body:
                 kwargs["extra_body"] = extra_body
-        return self.client.chat.completions.create(**kwargs)
+        return self._client_or_create().chat.completions.create(**kwargs)
 
     def complete_text(self, prompt: str, *, temperature: float = 0.2) -> str:
         if self.provider == "codex":
-            model = os.getenv("CODEX_COMPACTION_MODEL") or os.getenv("COMPACTION_MODEL") or self.model
+            model = get_env("CODEX_COMPACTION_MODEL") or get_env("COMPACTION_MODEL") or self.model
             return self._codex_complete(prompt, model=model)
 
         kwargs: dict[str, Any] = {
-            "model": os.getenv("COMPACTION_MODEL", self.model),
+            "model": get_env("COMPACTION_MODEL") or self.model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": temperature,
         }
@@ -233,7 +244,7 @@ class LLMClient:
             extra_body = _deepseek_extra_body()
             if extra_body:
                 kwargs["extra_body"] = extra_body
-        response = self.client.chat.completions.create(**kwargs)
+        response = self._client_or_create().chat.completions.create(**kwargs)
         return response.choices[0].message.content or ""
 
     def _codex_session_kwargs(self) -> dict[str, Any]:
@@ -249,8 +260,8 @@ class LLMClient:
         return status == 429 or "rate limit" in str(exc).lower()
 
     def _codex_retry(self, fn):
-        max_retries = int(os.getenv("CODEX_MAX_RETRIES", "8"))
-        retry_sleep = float(os.getenv("CODEX_RETRY_SLEEP", "3.5"))
+        max_retries = int(get_env("CODEX_MAX_RETRIES", "8"))
+        retry_sleep = float(get_env("CODEX_RETRY_SLEEP", "3.5"))
         for attempt in range(max_retries + 1):
             try:
                 return fn()
@@ -264,7 +275,7 @@ class LLMClient:
     def _codex_complete(self, prompt: str, *, model: str) -> str:
         def run_once() -> str:
             text_parts: list[str] = []
-            with self.client.responses.stream(
+            with self._client_or_create().responses.stream(
                 model=model,
                 input=[{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
                 **self._codex_session_kwargs(),
@@ -294,7 +305,7 @@ class LLMClient:
 
             text_parts: list[str] = []
             collected: list[Any] = []
-            with self.client.responses.stream(**kwargs) as stream:
+            with self._client_or_create().responses.stream(**kwargs) as stream:
                 for event in stream:
                     if event.type == "response.output_text.delta" and event.delta:
                         text_parts.append(event.delta)

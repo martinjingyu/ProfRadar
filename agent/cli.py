@@ -25,6 +25,18 @@ def main() -> None:
         action="store_true",
         help="Wrap the agent in a Guardian process that auto-restarts on code changes.",
     )
+    parser.add_argument(
+        "--setup-browser-profile",
+        nargs="?",
+        const="",
+        metavar="CHROME_PROFILE",
+        help="Copy an existing Chrome profile into the agent shared browser profile.",
+    )
+    parser.add_argument(
+        "--login-browser",
+        action="store_true",
+        help="Open Chrome with the shared agent browser profile so you can log in manually.",
+    )
     args = parser.parse_args()
 
     if args.guardian:
@@ -34,6 +46,16 @@ def main() -> None:
         return
 
     load_dotenv()
+
+    if args.setup_browser_profile is not None:
+        from .browser_profile import setup_profile
+        setup_profile(args.setup_browser_profile or None)
+        return
+
+    if args.login_browser:
+        from .browser_profile import login_session
+        login_session()
+        return
 
     agent = GeneralAgent(
         model=args.model,

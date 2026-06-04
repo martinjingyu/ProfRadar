@@ -318,3 +318,4 @@ registry.register(
     },
     _read_pdf,
 )
+

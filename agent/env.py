@@ -6,8 +6,12 @@ from pathlib import Path
 from .paths import PROJECT_ROOT
 
 
-def load_dotenv(path: Path | None = None) -> None:
-    env_path = path or PROJECT_ROOT / ".env"
+LOCAL_ENV_PATH = PROJECT_ROOT / ".env"
+PROJECT_ENV_PATH = PROJECT_ROOT.parent / ".env"
+
+
+def load_env(path: Path) -> None:
+    env_path = path
     if not env_path.exists():
         return
     for raw_line in env_path.read_text(encoding="utf-8").splitlines():
@@ -19,3 +23,18 @@ def load_dotenv(path: Path | None = None) -> None:
         value = value.strip().strip("\"'")
         if key and key not in os.environ:
             os.environ[key] = value
+
+
+def load_dotenv(path: Path | None = None) -> None:
+    if path is not None:
+        load_env(path)
+        return
+    load_env(LOCAL_ENV_PATH)
+    load_env(PROJECT_ENV_PATH)
+
+
+def get_env(name: str, default: str = "") -> str:
+    return os.getenv(name, default)
+
+
+load_dotenv()

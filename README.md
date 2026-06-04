@@ -98,6 +98,17 @@ AZURE_OPENAI_DEPLOYMENT=your-deployment-name
 
 # Default provider
 DEFAULT_PROVIDER=openai
+
+# Agent provider, used by `python run_agent.py`
+AGENT_PROVIDER=deepseek
+SCREENING_MODEL_PROVIDER=deepseek
+DEEPSEEK_API_KEY=...
+DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+
+# Or use Codex agent mode after `codex login`
+CODEX_MODEL=gpt-5.4
+CODEX_BASE_URL=https://chatgpt.com/backend-api/codex
 ```
 
 ---
