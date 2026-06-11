@@ -33,6 +33,7 @@ def _extract_docx_text(path: Path) -> str:
 def _read_file(args: dict, runtime: dict) -> str:
     raw_path = args.get("path")
     max_chars = int(args.get("max_chars") or 20000)
+    offset = max(0, int(args.get("offset") or 0))
     try:
         path = resolve_workspace_path(raw_path)
     except ValueError:
@@ -43,13 +44,23 @@ def _read_file(args: dict, runtime: dict) -> str:
         text = _extract_docx_text(path)
     else:
         text = path.read_text(encoding="utf-8", errors="replace")
-    truncated = len(text) > max_chars
-    return json_result(
-        success=True,
-        path=str(path),
-        content=text[:max_chars],
-        truncated=truncated,
-    )
+    total_chars = len(text)
+    window = text[offset:]
+    content = window[:max_chars]
+    has_more = len(window) > max_chars
+    result: dict = {
+        "success": True,
+        "path": str(path),
+        "content": content,
+        "offset": offset,
+        "total_chars": total_chars,
+    }
+    if has_more:
+        next_offset = offset + len(content)
+        result["truncated"] = True
+        result["next_offset"] = next_offset
+        result["chars_remaining"] = total_chars - next_offset
+    return json_result(**result)
 
 
 def _write_file(args: dict, runtime: dict) -> str:
@@ -119,10 +130,21 @@ def _patch_file(args: dict, runtime: dict) -> str:
 registry.register(
     "read_file",
     {
-        "description": "Read a text file. Supports .txt, .md, .py, .json, .csv, .yaml, .xml, .html, .docx, and other UTF-8 text files. Absolute paths can also be read when needed.",
+        "description": (
+            "Read a text file. Supports .txt, .md, .py, .json, .csv, .yaml, .xml, .html, .docx, and other UTF-8 text files. "
+            "Absolute paths can also be read. "
+            "Use offset+max_chars to paginate through large files: the result includes next_offset and chars_remaining "
+            "so you know where to continue. Example: read_file(path=p, offset=0, max_chars=8000) then "
+            "read_file(path=p, offset=8000, max_chars=8000). "
+            "Large tool results are automatically cached to disk — use this tool with the given path to read them in chunks."
+        ),
         "parameters": {
             "type": "object",
-            "properties": {"path": {"type": "string"}, "max_chars": {"type": "integer", "default": 20000}},
+            "properties": {
+                "path": {"type": "string"},
+                "max_chars": {"type": "integer", "default": 20000, "description": "Max chars to return per call."},
+                "offset": {"type": "integer", "default": 0, "description": "Start reading from this char position (for pagination)."},
+            },
             "required": ["path"],
         },
     },

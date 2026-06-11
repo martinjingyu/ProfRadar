@@ -1,6 +1,0 @@
-2026/06/04-15:35:47.718 5484 Reusing MANIFEST C:\Users\LX034\AppData\Local\Google\Chrome\User Data\Profile 1\Local Storage\leveldb/MANIFEST-000001
-2026/06/04-15:35:47.720 5484 Recovering log #736
-2026/06/04-15:35:47.726 5484 Reusing old log C:\Users\LX034\AppData\Local\Google\Chrome\User Data\Profile 1\Local Storage\leveldb/000736.log 
-2026/06/04-17:06:11.186 5b58 Level-0 table #742: started
-2026/06/04-17:06:11.192 5b58 Level-0 table #742: 49442 bytes OK
-2026/06/04-17:06:11.194 5b58 Delete type=0 #736

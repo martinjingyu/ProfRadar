@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import atexit
 import json
 import os
+import shutil
 import subprocess
+import threading
 from pathlib import Path
 from urllib.parse import quote_plus
 
@@ -13,18 +16,131 @@ CLI_PATH = Path(os.getenv("AGENT_BROWSER_CLI", str(Path(__file__).parent / "cli.
 SNAPSHOT_MAX_CHARS = 10_000
 NAVIGATE_SNAPSHOT_MAX_CHARS = 8_000
 
-PROC_PID = os.getpid()
-BROWSER_PORT = int(os.getenv("AGENT_BROWSER_PORT", str(9222 + PROC_PID % 1000)))
-BROWSER_INSTANCE = os.getenv("AGENT_BROWSER_INSTANCE", str(PROC_PID))
+# Per-process base port/instance.  Port layout:
+#   base = 9222 + (PID % 100) * 10  →  10 slots per process, 100 process slots total.
+# Within a process each thread gets its own offset so parallel SubAgents never share
+# a Chrome tab, refs.json state, or user-data-dir.
+_PROC_PID = os.getpid()
+_BROWSER_PORT_BASE = int(os.getenv("AGENT_BROWSER_PORT", str(9222 + (_PROC_PID % 100) * 10)))
+_BROWSER_INSTANCE_BASE = os.getenv("AGENT_BROWSER_INSTANCE", str(_PROC_PID))
+
+_thread_local = threading.local()
+_slot_lock = threading.Lock()
+_slot_counter = [0]
+
+_active_ports: set[int] = set()
+_active_ports_lock = threading.Lock()
+
+
+def _mark_port_active(port: int) -> None:
+    with _active_ports_lock:
+        _active_ports.add(port)
+
+
+def _kill_chrome_on_port(port: int) -> None:
+    """Force-kill Chrome process(es) listening on the given debugging port."""
+    try:
+        if os.name == "nt":
+            r = subprocess.run(
+                [
+                    "powershell", "-Command",
+                    f"Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue"
+                    f" | Select-Object -ExpandProperty OwningProcess",
+                ],
+                capture_output=True, text=True, timeout=8,
+                creationflags=0x08000000,
+            )
+            for line in r.stdout.splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    subprocess.run(
+                        ["taskkill", "/F", "/PID", line],
+                        capture_output=True, timeout=5,
+                        creationflags=0x08000000,
+                    )
+        else:
+            subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+
+def _atexit_cleanup() -> None:
+    """Kill every Chrome instance this process launched."""
+    with _active_ports_lock:
+        ports = set(_active_ports)
+    for port in ports:
+        _kill_chrome_on_port(port)
+
+
+atexit.register(_atexit_cleanup)
+
+
+def _thread_slot() -> tuple[int, str, int]:
+    """Return (port, instance_id, slot_index) unique to the calling thread, allocated lazily."""
+    if not hasattr(_thread_local, "port"):
+        with _slot_lock:
+            idx = _slot_counter[0]
+            _slot_counter[0] += 1
+        _thread_local.port = _BROWSER_PORT_BASE + idx
+        _thread_local.instance = (
+            _BROWSER_INSTANCE_BASE if idx == 0
+            else f"{_BROWSER_INSTANCE_BASE}_t{idx}"
+        )
+        _thread_local.idx = idx
+    return _thread_local.port, _thread_local.instance, _thread_local.idx
+
+
+def _ensure_worker_profile(instance: str) -> None:
+    """Copy the run profile to a per-thread directory on first use.
+
+    Slot 0 (main thread) uses the run profile directly via AGENT_BROWSER_PROFILE in os.environ.
+    Slots 1+ copy it to a fresh per-thread directory so parallel Chrome instances don't share
+    a user-data-dir, which causes crashes and lock conflicts.
+    """
+    if getattr(_thread_local, "profile_ready", False):
+        return
+
+    from ..browser_profile import PROFILES_DIR
+
+    run_profile = os.environ.get("AGENT_BROWSER_PROFILE", "")
+    if not run_profile:
+        _thread_local.profile_ready = True
+        return
+
+    src = PROFILES_DIR / run_profile
+    dst = PROFILES_DIR / instance
+
+    if not dst.exists() and src.exists():
+        def _copy_skip(s: str, d: str) -> None:
+            try:
+                shutil.copy2(s, d)
+            except OSError:
+                pass  # skip files locked by the running Chrome in slot 0
+
+        try:
+            shutil.copytree(
+                src, dst,
+                ignore=shutil.ignore_patterns("*.tmp", "LOG", "LOCK", "*.lock"),
+                copy_function=_copy_skip,
+            )
+            print(f"[Browser] Copied run profile → profiles/{instance}/")
+        except Exception as exc:
+            print(f"[Browser] Could not copy run profile for {instance}: {exc}")
+
+    _thread_local.profile_ready = True
 
 
 def _cli_env() -> dict[str, str]:
+    """Build subprocess env for the calling thread's browser slot."""
     from ..browser_profile import ensure_browser_profile
-
     ensure_browser_profile()
+    port, instance, idx = _thread_slot()
     env = dict(os.environ)
-    env.setdefault("AGENT_BROWSER_PORT", str(BROWSER_PORT))
-    env.setdefault("AGENT_BROWSER_INSTANCE", BROWSER_INSTANCE)
+    env["AGENT_BROWSER_PORT"] = str(port)
+    env["AGENT_BROWSER_INSTANCE"] = instance
+    if idx != 0:
+        _ensure_worker_profile(instance)
+        env["AGENT_BROWSER_PROFILE"] = instance
     return env
 
 
@@ -33,6 +149,9 @@ def _run(command: str, *args: str, timeout: int = 60) -> dict:
     kwargs: dict = {}
     if os.name == "nt":
         kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+
+    port, _, _ = _thread_slot()
+    _mark_port_active(port)
 
     try:
         proc = subprocess.run(
@@ -65,11 +184,25 @@ def _run(command: str, *args: str, timeout: int = 60) -> dict:
     return {"success": True, "output": stdout}
 
 
+def _run_recovering(command: str, *args: str, timeout: int = 60) -> dict:
+    """Run a CDP command; on session freeze restart the browser and retry once."""
+    result = _run(command, *args, timeout=timeout)
+    if not result.get("success") and "CDP command timed out" in result.get("error", ""):
+        print(f"[Browser] CDP timeout on '{command}', restarting browser session and retrying...")
+        close_browser()
+        result = _run(command, *args, timeout=timeout)
+    return result
+
+
 def _truncate_text(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
-    return text[:max_chars] + "\n\n[truncated - call browser_snapshot(full=true) to see more]"
+    return text[:max_chars] + "\n\n[truncated - call browser_snapshot to see more]"
 
+
+# ---------------------------------------------------------------------------
+# Public browser functions
+# ---------------------------------------------------------------------------
 
 def navigate(url: str) -> dict:
     result = _run("open", url, timeout=90)
@@ -149,9 +282,11 @@ def back() -> dict:
 
 
 def close_browser() -> dict:
-    result = _run("close", timeout=15)
-    if not result.get("success"):
-        return result
+    port, _, _ = _thread_slot()
+    _run("close", timeout=15)
+    _kill_chrome_on_port(port)  # fallback if CDP close left the process running
+    with _active_ports_lock:
+        _active_ports.discard(port)
     return {"success": True}
 
 
@@ -166,61 +301,56 @@ def search(engine: str, query: str) -> dict:
     return navigate(urls[engine])
 
 
+# ---------------------------------------------------------------------------
+# Tool handlers
+# ---------------------------------------------------------------------------
+
 def _h_navigate(args: dict, _rt: dict) -> str:
     return json_result(**navigate(args.get("url", "")))
-
 
 def _h_snapshot(args: dict, _rt: dict) -> str:
     return json_result(**snapshot(full=bool(args.get("full", True))))
 
-
 def _h_click(args: dict, _rt: dict) -> str:
     return json_result(**click(args.get("ref", "")))
-
 
 def _h_type(args: dict, _rt: dict) -> str:
     return json_result(**type_text(args.get("text", "")))
 
-
 def _h_press_key(args: dict, _rt: dict) -> str:
     return json_result(**press_key(args.get("key", "")))
-
 
 def _h_scroll(args: dict, _rt: dict) -> str:
     return json_result(**scroll(args.get("direction", "down"), int(args.get("pixels", 600))))
 
-
 def _h_screenshot(args: dict, _rt: dict) -> str:
     return json_result(**screenshot(args.get("path")))
-
 
 def _h_back(args: dict, _rt: dict) -> str:
     return json_result(**back())
 
-
 def _h_close(args: dict, _rt: dict) -> str:
     return json_result(**close_browser())
-
 
 def _h_google_search(args: dict, _rt: dict) -> str:
     return json_result(**search("google", args.get("query", "")))
 
-
 def _h_bing_search(args: dict, _rt: dict) -> str:
     return json_result(**search("bing", args.get("query", "")))
-
 
 def _h_baidu_search(args: dict, _rt: dict) -> str:
     return json_result(**search("baidu", args.get("query", "")))
 
-
 def _h_reddit_search(args: dict, _rt: dict) -> str:
     return json_result(**search("reddit", args.get("query", "")))
-
 
 def _h_save_research_notes(args: dict, _rt: dict) -> str:
     return json_result(success=True)
 
+
+# ---------------------------------------------------------------------------
+# Tool registrations
+# ---------------------------------------------------------------------------
 
 registry.register("browser_navigate", {
     "description": "Navigate to a URL and return an accessibility snapshot. Use direct search tools for search-engine queries.",
@@ -270,7 +400,7 @@ registry.register("browser_back", {
 }, _h_back)
 
 registry.register("browser_close", {
-    "description": "Close this agent run's browser instance.",
+    "description": "Close this agent's browser instance and release its port.",
     "parameters": {"type": "object", "properties": {}, "required": []},
 }, _h_close)
 

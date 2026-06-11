@@ -12,18 +12,30 @@
 - **Areas**: {{AREAS}}
 - **Summary**: {{SUMMARY}}
 - **Why it fits**: {{FIT_REASON}}
+- **Recent papers**: {{RECENT_PAPERS}}
+- **Lab**: {{LAB_NAME}}
+- **Taking students**: {{STUDENT_OPENINGS}}
+- **Cold-email tip**: {{CONTACT_TIP}}
 - **Homepage**: {{HOMEPAGE}}
 
 ### 🥈 2. {{NAME}} — {{SCORE}}/10
 - **Areas**: {{AREAS}}
 - **Summary**: {{SUMMARY}}
 - **Why it fits**: {{FIT_REASON}}
+- **Recent papers**: {{RECENT_PAPERS}}
+- **Lab**: {{LAB_NAME}}
+- **Taking students**: {{STUDENT_OPENINGS}}
+- **Cold-email tip**: {{CONTACT_TIP}}
 - **Homepage**: {{HOMEPAGE}}
 
 ### 🥉 3. {{NAME}} — {{SCORE}}/10
 - **Areas**: {{AREAS}}
 - **Summary**: {{SUMMARY}}
 - **Why it fits**: {{FIT_REASON}}
+- **Recent papers**: {{RECENT_PAPERS}}
+- **Lab**: {{LAB_NAME}}
+- **Taking students**: {{STUDENT_OPENINGS}}
+- **Cold-email tip**: {{CONTACT_TIP}}
 - **Homepage**: {{HOMEPAGE}}
 
 ---
@@ -33,6 +45,10 @@
 ### {{NAME}}
 - **Areas**: {{AREAS}}
 - **Summary**: {{SUMMARY}}
+- **Recent papers**: {{RECENT_PAPERS}}
+- **Lab**: {{LAB_NAME}}
+- **Taking students**: {{STUDENT_OPENINGS}}
+- **Cold-email tip**: {{CONTACT_TIP}}
 - **Homepage**: {{HOMEPAGE}}
 
 ---

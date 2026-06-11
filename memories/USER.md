@@ -1,0 +1,1 @@
+User does NOT want research areas related to: red teaming, AI safety, adversarial robustness, or security-focused LLM alignment. They prefer core NLP/ML research (e.g., LLM evaluation, code generation, RAG, reasoning, multilingual NLP).

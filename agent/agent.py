@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sys
 import time
 import uuid
 from typing import Any
@@ -59,6 +58,8 @@ FINISH_BLOCKED_TOOLS = {
     "browser_scroll",
     "browser_screenshot",
     "browser_back",
+    "summarize_professors_parallel",
+    "deep_research_professors",
 }
 FINISH_REMINDER = (
     "Maximum iteration budget reached. Do not fetch more data or research more professors. "
@@ -101,8 +102,6 @@ class GeneralAgent:
         self._spill_counter = 0
         self._last_trajectory_compress_iter = 0
         self.ui.session_start(self.session_id, self.task_id)
-        self._pending_restart: list[str] | None = None
-        self._pending_restart_prompt: str | None = None
 
     def _skills_index(self) -> str:
         result = registry.dispatch("skills_list", {}, {"task_id": self.task_id})
@@ -310,11 +309,6 @@ class GeneralAgent:
                             final_text = str(runtime.get("final_response") or "")
                         if runtime.get("compact_requested"):
                             compact_focus = str(runtime["compact_requested"])
-                        if runtime.get("_pending_restart"):
-                            self._pending_restart = runtime["_pending_restart"]
-                            if runtime.get("_pending_restart_prompt"):
-                                self._pending_restart_prompt = runtime["_pending_restart_prompt"]
-
                     result = self._process_tool_result(result, tc.function.name)
                     self.ui.tool_done(tc.function.name, result)
                     messages.append(
@@ -397,17 +391,6 @@ class GeneralAgent:
                 background=True,
             )
 
-        if self._pending_restart:
-            from .guardian import request_restart
-            request_restart(
-                changes=self._pending_restart,
-                session_id=self.session_id,
-                resume_path=str(session_path),
-                next_prompt=self._pending_restart_prompt,
-            )
-            sys.stdout.flush()
-            sys.exit(42)
-
         return {
             "session_id": self.session_id,
             "session_path": str(session_path),
@@ -442,12 +425,14 @@ class GeneralAgent:
         self._spill_counter += 1
         path = self._spill_dir / f"{tool_name}_{self._spill_counter:04d}_{int(time.time())}.txt"
         path.write_text(result, encoding="utf-8")
+        total_chars = len(result)
         preview = result[:SPILL_PREVIEW_CHARS]
         return (
-            "[content too large; saved to disk]\n"
+            f"[content too large ({total_chars:,} chars); cached to disk]\n"
             f"path: {path}\n"
-            "Use read_file(path) if the full content is needed.\n\n"
-            f"--- preview ({SPILL_PREVIEW_CHARS} chars) ---\n"
+            f"Read in chunks: read_file(path='{path}', offset=0, max_chars=8000)\n"
+            f"Then paginate: read_file(path='{path}', offset=8000, max_chars=8000), etc.\n\n"
+            f"--- preview (first {SPILL_PREVIEW_CHARS} chars) ---\n"
             f"{preview}\n[...]"
         )
 
